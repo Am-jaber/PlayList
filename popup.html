@@ -1,0 +1,72 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        width: 260px;
+        margin: 0;
+        font-family: Roboto, Arial, sans-serif;
+        background: #0f0f0f;
+        color: #f1f1f1;
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 14px 16px 8px;
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .header svg { fill: #ff0000; }
+      .body { padding: 4px 16px 16px; font-size: 13px; line-height: 1.5; color: #aaa; }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 16px;
+        border-top: 1px solid #272727;
+        border-bottom: 1px solid #272727;
+        font-size: 13px;
+        color: #f1f1f1;
+      }
+      /* toggle switch */
+      .switch { position: relative; width: 40px; height: 22px; }
+      .switch input { opacity: 0; width: 0; height: 0; }
+      .slider {
+        position: absolute; inset: 0; cursor: pointer;
+        background: #555; border-radius: 22px; transition: .2s;
+      }
+      .slider::before {
+        content: ""; position: absolute; height: 16px; width: 16px;
+        left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: .2s;
+      }
+      input:checked + .slider { background: #3ea6ff; }
+      input:checked + .slider::before { transform: translateX(18px); }
+      kbd {
+        background: #272727; border-radius: 4px; padding: 1px 6px;
+        font-family: inherit; color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <svg width="20" height="20" viewBox="0 0 24 24"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h10v2H4zm12 0l5-3-5-3z"/></svg>
+      Add to Queue
+    </div>
+    <div class="body">
+      Middle-click any video to add it to YouTube's queue instead of opening a new tab.
+    </div>
+    <div class="row">
+      <span>Enabled</span>
+      <label class="switch">
+        <input type="checkbox" id="toggle" checked />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="body" style="padding-top:12px;">
+      Tip: <kbd>Middle-click</kbd> a thumbnail or title on any YouTube page.
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>
