@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Middle-Click Add to Queue",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Middle-click a YouTube video to add it to the queue instead of opening it in a new tab.",
   "permissions": ["storage"],
   "icons": {
