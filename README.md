@@ -63,4 +63,3 @@ localStorage.removeItem("mcq_debug");
 | `content.js` | Core logic: intercept middle-click, trigger Add to queue |
 | `popup.html` / `popup.js` | On/off toggle UI |
 | `icons/` | Extension icons |
-| `make_icons.py` | Regenerates the icons (no dependencies) |
