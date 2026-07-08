@@ -1,0 +1,8 @@
+# Build output
+*.zip
+*.crx
+*.pem
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
