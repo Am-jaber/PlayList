@@ -59,11 +59,12 @@
     const resolve = pending.get(msg.token);
     if (resolve) {
       pending.delete(msg.token);
-      resolve(msg.ok);
+      // Resolve with the full result so the caller can pick the toast text.
+      resolve({ ok: msg.ok, action: msg.action || (msg.ok ? "queued" : "none") });
     }
   });
 
-  function requestAddToQueue(rendererEl) {
+  function requestAction(rendererEl) {
     return new Promise((resolve) => {
       // Deterministic token (avoids Math.random / Date.now); unique per page load.
       const token = "mcq-" + (++tokenCounterSeed);
@@ -72,7 +73,7 @@
       window.postMessage({ source: "mcq", type: "add-to-queue", token }, "*");
       // Safety timeout so a lost message doesn't leak the pending entry.
       setTimeout(() => {
-        if (pending.has(token)) { pending.delete(token); resolve(false); }
+        if (pending.has(token)) { pending.delete(token); resolve({ ok: false, action: "none" }); }
       }, 1500);
     });
   }
@@ -85,6 +86,7 @@
     "ytd-compact-video-renderer",
     "ytd-grid-video-renderer",
     "ytd-playlist-video-renderer",
+    "ytd-playlist-panel-video-renderer",   // sidebar mix/queue panel items
     "ytd-reel-item-renderer",
     "yt-lockup-view-model",
     "ytd-rich-grid-media",
@@ -112,9 +114,9 @@
     if (!renderer) { log("no renderer for target"); return; }
     busy = true;
     try {
-      const ok = await requestAddToQueue(renderer);
-      if (ok) showToast("Added to queue");
-      else log("add-to-queue reported failure");
+      const { ok, action } = await requestAction(renderer);
+      if (ok) showToast(action === "playing" ? "Playing" : "Added to queue");
+      else log("action reported failure");
     } finally {
       busy = false;
     }

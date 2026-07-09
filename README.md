@@ -17,8 +17,12 @@ You'll see a small "Added to queue" toast at the bottom of the page.
 ## Usage
 
 - **Middle-click** (press the mouse wheel) on any video's thumbnail or title on a
-  YouTube listing page (home, search, channel, sidebar, etc.).
+  YouTube listing page — home, search, channel, and the watch-page sidebar.
 - The video is added to your queue instead of opening a new tab.
+- **Watch-page sidebar behavior:**
+  - Normal recommendations → **added to queue**.
+  - Items in an active **mix / radio panel** (already queued) → **jump to & play**
+    that video in the current queue.
 - Click the extension icon to toggle it on/off.
 
 ## How it works
@@ -27,16 +31,24 @@ It calls YouTube's own **"Add to queue"** command directly — no menu is opened
 
 - `content.js` (isolated world) captures the middle-mouse button before the
   browser opens a new tab, stamps the clicked video element, and asks the page
-  script to run the queue command.
-- `injected.js` (page main world) reads the video's Polymer `.data`, extracts the
-  `addToPlaylistCommand` whose `listType` is `PLAYLIST_EDIT_LIST_TYPE_QUEUE`, and
-  hands it to `ytd-app.resolveCommand(...)` — the exact handler the menu item
-  uses.
+  script to run the command.
+- `injected.js` (page main world) picks an action for the clicked item, in order:
+  1. **Add to queue** — read the item's Polymer `.data` for an
+     `addToPlaylistCommand` with `listType: PLAYLIST_EDIT_LIST_TYPE_QUEUE`
+     (home/search).
+  2. **Jump to video** — a `watchEndpoint`, for mix/radio panel items that are
+     already queued.
+  3. **Synthesized add-to-queue** — sidebar recommendations render as pure
+     view-models with *no* command in their data, so we build the queue command
+     ourselves from the videoId in the item's link.
+  It then hands the command to `ytd-app.resolveCommand(...)` — the same dispatcher
+  YouTube's own UI uses.
 
 The two worlds talk over `window.postMessage`; the target element is identified
-by a temporary `data-mcq-target` attribute on the shared DOM. This works with
-YouTube's current `lockupViewModel` layout and doesn't depend on menu text or
-UI, so it's language-independent.
+by a temporary `data-mcq-target` attribute on the shared DOM. It doesn't depend
+on menu text or UI, so it's language-independent. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full "command data, not handlers"
+technique and [ROADMAP.md](ROADMAP.md) for planned features.
 
 ## Troubleshooting
 
@@ -60,7 +72,11 @@ localStorage.removeItem("mcq_debug");
 | File | Purpose |
 |------|---------|
 | `manifest.json` | Extension manifest (MV3) |
-| `content.js` | Core logic: intercept middle-click, trigger Add to queue |
+| `content.js` | Isolated-world: intercept middle-click, bridge to the page |
+| `injected.js` | Page main-world: pick and dispatch the YouTube command |
 | `popup.html` / `popup.js` | On/off toggle UI |
 | `icons/` | Extension icons |
-| `make_icons.py` | Regenerates the icons (no dependencies) |
+| `make_icons.py` | Regenerates the icons (no dependencies; not shipped) |
+| `ARCHITECTURE.md` | How it works + the reverse-engineering technique |
+| `ROADMAP.md` | Planned/future features |
+| `.github/workflows/build.yml` | CI: packages the extension zip on push |

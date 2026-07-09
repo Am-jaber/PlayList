@@ -21,6 +21,7 @@
     "ytd-compact-video-renderer",
     "ytd-grid-video-renderer",
     "ytd-playlist-video-renderer",
+    "ytd-playlist-panel-video-renderer",   // sidebar mix/queue panel items
     "ytd-reel-item-renderer",
     "yt-lockup-view-model",
     "ytd-rich-grid-media",
@@ -76,6 +77,94 @@
     return null;
   }
 
+  /**
+   * Deep-search for a plain watch command (watchEndpoint). Used for the sidebar
+   * mix/queue panel, whose items are ALREADY in the active queue and therefore
+   * carry no addToPlaylistCommand -- middle-clicking them should jump to / play
+   * that video within the current queue instead of adding it.
+   *
+   * We prefer a watchEndpoint that references the current playlist (has a
+   * `playlistId` / `index`) so the video plays *in place* in the queue rather
+   * than starting a fresh single-video watch.
+   */
+  function findWatchCommand(root) {
+    const stack = [root], seen = new Set();
+    let fallback = null;
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || typeof node !== "object" || seen.has(node)) continue;
+      seen.add(node);
+
+      const we = node.watchEndpoint;
+      if (we && we.videoId) {
+        const cmd = {
+          clickTrackingParams: node.clickTrackingParams,
+          commandMetadata: {
+            webCommandMetadata: {
+              webPageType: "WEB_PAGE_TYPE_WATCH",
+            },
+          },
+          watchEndpoint: we,
+        };
+        // Prefer one that stays within the current playlist/queue.
+        if (we.playlistId || we.index != null) return cmd;
+        if (!fallback) fallback = cmd;
+      }
+      for (const k in node) {
+        const v = node[k];
+        if (v && typeof v === "object") stack.push(v);
+      }
+    }
+    return fallback;
+  }
+
+  /**
+   * Extract a videoId from an element by looking at its watch links.
+   * Used for surfaces (e.g. sidebar recommendations) whose `.data` carries no
+   * command at all -- we build the queue command ourselves from the id.
+   */
+  function findVideoId(el) {
+    const a = el.matches?.("a[href*='/watch?']")
+      ? el
+      : el.querySelector?.("a[href*='/watch?']") ||
+        el.closest?.("a[href*='/watch?']");
+    if (!a) return null;
+    try {
+      return new URL(a.href, location.origin).searchParams.get("v");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Build an Add-to-queue command from scratch given only a videoId. This is the
+   * fallback for elements that render as pure view-models with no command in
+   * their data (notably watch-page sidebar recommendations). The shape mirrors
+   * the real command YouTube attaches elsewhere; only the videoId varies.
+   */
+  function synthesizeQueueCommand(videoId) {
+    return {
+      commandMetadata: { webCommandMetadata: { sendPost: true } },
+      signalServiceEndpoint: {
+        signal: "CLIENT_SIGNAL",
+        actions: [{
+          addToPlaylistCommand: {
+            openMiniplayer: true,
+            videoId,
+            listType: "PLAYLIST_EDIT_LIST_TYPE_QUEUE",
+            onCreateListCommand: {
+              commandMetadata: {
+                webCommandMetadata: { sendPost: true, apiUrl: "/youtubei/v1/playlist/create" },
+              },
+              createPlaylistServiceEndpoint: { videoIds: [videoId], params: "CAQ%3D" },
+            },
+            videoIds: [videoId],
+          },
+        }],
+      },
+    };
+  }
+
   let appEl = null;
   function getApp() {
     if (appEl && appEl.isConnected) return appEl;
@@ -106,20 +195,49 @@
     return true;
   }
 
-  /** Given the stamped target element, climb renderers until one yields a
-   *  queue command, then dispatch it. */
-  function addToQueue(targetEl) {
+  /**
+   * Given the stamped target element, climb renderers looking for an action to
+   * perform. Preference order:
+   *   1. Add to queue  (normal videos: home, search, recommendations)
+   *   2. Jump to video (sidebar mix/queue panel: already-queued items)
+   *
+   * Returns { action } describing what happened, or { action: "none" }.
+   */
+  function performAction(targetEl) {
     let el = targetEl && targetEl.closest ? targetEl.closest(VIDEO_RENDERERS) : null;
     let hops = 0;
-    while (el && hops < 5) {
+    while (el && hops < 6) {
       const data = getData(el);
-      const command = data && findQueueCommand(data);
-      if (command) return dispatch(command, el);
+      if (data) {
+        // 1) Prefer add-to-queue when the item's data offers it (home/search).
+        const queueCmd = findQueueCommand(data);
+        if (queueCmd) {
+          dispatch(queueCmd, el);
+          return { action: "queued" };
+        }
+        // 2) Otherwise (e.g. playlist/mix panel), jump to the video in-queue.
+        const watchCmd = findWatchCommand(data);
+        if (watchCmd) {
+          dispatch(watchCmd, el);
+          return { action: "playing" };
+        }
+      }
       el = el.parentElement ? el.parentElement.closest(VIDEO_RENDERERS) : null;
       hops++;
     }
-    log("no queue command found");
-    return false;
+
+    // 3) Fallback: element carried no usable command (e.g. sidebar
+    //    recommendations render as pure view-models). Build the queue command
+    //    ourselves from the videoId on the clicked link.
+    const videoId = findVideoId(targetEl);
+    if (videoId) {
+      dispatch(synthesizeQueueCommand(videoId), getApp());
+      log("queued via synthesized command:", videoId);
+      return { action: "queued" };
+    }
+
+    log("no actionable command found");
+    return { action: "none" };
   }
 
   window.addEventListener("message", (event) => {
@@ -128,16 +246,19 @@
     if (!msg || msg.source !== "mcq" || msg.type !== "add-to-queue") return;
 
     const targetEl = document.querySelector("[data-mcq-target]");
-    let ok = false;
+    let result = { action: "none" };
     try {
-      ok = addToQueue(targetEl);
+      result = performAction(targetEl);
     } catch (e) {
       log("error:", e);
     } finally {
       if (targetEl) targetEl.removeAttribute("data-mcq-target");
     }
 
-    window.postMessage({ source: "mcq-page", type: "result", token: msg.token, ok }, "*");
+    window.postMessage({
+      source: "mcq-page", type: "result", token: msg.token,
+      ok: result.action !== "none", action: result.action,
+    }, "*");
   });
 
   log("injected main-world dispatcher ready");
