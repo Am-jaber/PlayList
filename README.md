@@ -76,7 +76,3 @@ localStorage.removeItem("mcq_debug");
 | `injected.js` | Page main-world: pick and dispatch the YouTube command |
 | `popup.html` / `popup.js` | On/off toggle UI |
 | `icons/` | Extension icons |
-| `make_icons.py` | Regenerates the icons (no dependencies; not shipped) |
-| `ARCHITECTURE.md` | How it works + the reverse-engineering technique |
-| `ROADMAP.md` | Planned/future features |
-| `.github/workflows/build.yml` | CI: packages the extension zip on push |
