@@ -96,11 +96,21 @@
     return el && el.closest ? el.closest(VIDEO_RENDERERS) : null;
   }
 
-  function looksLikeVideo(el) {
-    if (!el || !el.closest) return false;
-    return !!(
-      el.closest("a[href*='/watch?'], a[href*='/shorts/'], a#thumbnail") ||
-      findRenderer(el)
+  /**
+   * Resolve the element to act on for a middle-click, most-specific first:
+   *   1. a known video renderer (its .data usually carries the queue command)
+   *   2. the hover-preview player overlay -- it mounts at the app level, OUTSIDE
+   *      the card renderer, so thumbnail clicks land here, not on the card
+   *   3. ANY watch/shorts link -- works on arbitrary surfaces (channel pages,
+   *      endscreens, description links, ...); the injected side synthesizes the
+   *      queue command from the link's videoId when no data command exists
+   */
+  function findActionTarget(el) {
+    if (!el || !el.closest) return null;
+    return (
+      findRenderer(el) ||
+      el.closest("ytd-video-preview, #video-preview") ||
+      el.closest("a[href*='/watch?'], a[href*='/shorts/'], a#thumbnail")
     );
   }
 
@@ -108,13 +118,13 @@
 
   let busy = false;
 
-  async function handle(target) {
+  async function handle(targetEl) {
     if (busy) return;
-    const renderer = findRenderer(target);
-    if (!renderer) { log("no renderer for target"); return; }
+    if (!targetEl) { log("handle called with no target"); return; }
+    log("acting on:", targetEl.tagName, targetEl.id || "");
     busy = true;
     try {
-      const { ok, action } = await requestAction(renderer);
+      const { ok, action } = await requestAction(targetEl);
       if (ok) showToast(action === "playing" ? "Playing" : "Added to queue");
       else log("action reported failure");
     } finally {
@@ -122,19 +132,35 @@
     }
   }
 
+  // The action target captured at mousedown. YouTube can swap the DOM under the
+  // cursor between mousedown and auxclick, so we resolve early and reuse it.
+  let armedTarget = null;
+
   function onPointer(e) {
     if (!enabled) return;
     if (e.button !== 1) return;                // middle button only
-    if (!looksLikeVideo(e.target)) return;
 
-    // Suppress the new-tab open as early as possible, in capture phase.
+    const actionTarget = findActionTarget(e.target);
+    if (!actionTarget && !armedTarget) return; // not a video -- let it through
+
+    // Suppress the new-tab open as early as possible, in capture phase, for
+    // every phase of the middle click.
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    // Perform the action once, on the up/aux phase.
+    if (e.type === "mousedown") {
+      armedTarget = actionTarget;
+      return;
+    }
+
+    // On the up/aux phase, act using the element captured at mousedown
+    // (falling back to a fresh lookup if we somehow didn't arm one).
     if (e.type === "auxclick" || e.type === "mouseup") {
-      handle(e.target);
+      const target = armedTarget || actionTarget;
+      armedTarget = null;
+      if (target) handle(target);
+      else log("no action target at action time");
     }
   }
 

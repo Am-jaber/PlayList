@@ -75,4 +75,6 @@ localStorage.removeItem("mcq_debug");
 | `content.js` | Isolated-world: intercept middle-click, bridge to the page |
 | `injected.js` | Page main-world: pick and dispatch the YouTube command |
 | `popup.html` / `popup.js` | On/off toggle UI |
-| `icons/` | Extension icons |
+| `icons/` | Extension icons (16/48/128, transparent background) |
+| `icon-master.png` | Full-res transparent icon master (not shipped) |
+| `process_icon.py` | Regenerates icons from a source image (needs Pillow; not shipped) |

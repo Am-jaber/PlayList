@@ -124,13 +124,17 @@
    * command at all -- we build the queue command ourselves from the id.
    */
   function findVideoId(el) {
-    const a = el.matches?.("a[href*='/watch?']")
+    const SEL = "a[href*='/watch?'], a[href*='/shorts/']";
+    const a = el.matches?.(SEL)
       ? el
-      : el.querySelector?.("a[href*='/watch?']") ||
-        el.closest?.("a[href*='/watch?']");
+      : el.querySelector?.(SEL) || el.closest?.(SEL);
     if (!a) return null;
     try {
-      return new URL(a.href, location.origin).searchParams.get("v");
+      const url = new URL(a.href, location.origin);
+      // /watch?v=ID -- id in the query; /shorts/ID -- id in the path.
+      return url.searchParams.get("v") ||
+             (url.pathname.match(/^\/shorts\/([\w-]+)/) || [])[1] ||
+             null;
     } catch {
       return null;
     }
@@ -163,6 +167,25 @@
         }],
       },
     };
+  }
+
+  /**
+   * Climb ancestor renderers from `el` looking for a real queue command.
+   * closest() alone is not enough: the innermost renderer (e.g.
+   * yt-lockup-view-model) often has empty data while the command lives on an
+   * outer one (e.g. ytd-rich-item-renderer).
+   */
+  function findQueueCommandNear(el) {
+    let r = el && el.closest ? el.closest(VIDEO_RENDERERS) : null;
+    let hops = 0;
+    while (r && hops < 6) {
+      const data = getData(r);
+      const cmd = data && findQueueCommand(data);
+      if (cmd) return { cmd, el: r };
+      r = r.parentElement ? r.parentElement.closest(VIDEO_RENDERERS) : null;
+      hops++;
+    }
+    return null;
   }
 
   let appEl = null;
@@ -226,11 +249,24 @@
       hops++;
     }
 
-    // 3) Fallback: element carried no usable command (e.g. sidebar
-    //    recommendations render as pure view-models). Build the queue command
-    //    ourselves from the videoId on the clicked link.
+    // 3) Fallback: element carried no usable command (hover-preview overlay,
+    //    bare links, surfaces whose view-model data is empty). Resolve the
+    //    videoId from the nearest link, then:
+    //    3a) prefer the REAL command from another renderer of the same video
+    //        elsewhere in the DOM (the hover preview always overlays a card
+    //        that exists on the page) -- the genuine command carries the full
+    //        context that makes YouTube's queue UI update immediately;
+    //    3b) only synthesize from scratch when no such renderer exists.
     const videoId = findVideoId(targetEl);
     if (videoId) {
+      for (const a of document.querySelectorAll(`a[href*="${videoId}"]`)) {
+        const hit = findQueueCommandNear(a);   // climbs ancestor renderers
+        if (hit) {
+          dispatch(hit.cmd, hit.el);
+          log("queued via matched renderer command:", videoId);
+          return { action: "queued" };
+        }
+      }
       dispatch(synthesizeQueueCommand(videoId), getApp());
       log("queued via synthesized command:", videoId);
       return { action: "queued" };
