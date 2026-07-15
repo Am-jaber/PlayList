@@ -93,6 +93,63 @@ out of the data — not just queue.
 
 ---
 
+## ⚠️ The big gotcha: resolveCommand no-ops on an EMPTY queue
+
+`resolveCommand(addToPlaylistCommand)` adds to the queue **only when a queue
+already exists**. From an *empty* queue (no active player/miniplayer, zero items)
+it silently does nothing — the backend may record it, but nothing renders until a
+reload. This cost us a long debugging session; do not trust resolveCommand for
+queueing.
+
+**What actually works from any state** is the DOM action YouTube's own menu/hover
+button fires: a `yt-action` event named **`yt-add-to-playlist-command`**, called
+with **three** args (not one):
+
+```js
+const addToPlaylistCommand = {
+  openMiniplayer: true, videoId, listType: "PLAYLIST_EDIT_LIST_TYPE_QUEUE",
+  onCreateListCommand: { commandMetadata: { webCommandMetadata: { sendPost: true,
+    apiUrl: "/youtubei/v1/playlist/create" } },
+    createPlaylistServiceEndpoint: { videoIds: [videoId], params: "CAQ%3D" } },
+  videoIds: [videoId],
+  videoCommand: { commandMetadata: { webCommandMetadata: {
+    url: "/watch?v=" + videoId, webPageType: "WEB_PAGE_TYPE_WATCH", rootVe: 3832 } },
+    watchEndpoint: { videoId } },
+};
+const arg0 = { addToPlaylistCommand };
+const arg1 = sourceElement;                              // the source Element
+const arg2 = { sourceData: { commandMetadata: { webCommandMetadata: { sendPost: true } },
+  signalServiceEndpoint: { signal: "CLIENT_SIGNAL", actions: [arg0] } } };
+
+sourceElement.dispatchEvent(new CustomEvent("yt-action", {
+  detail: { actionName: "yt-add-to-playlist-command", args: [arg0, arg1, arg2], returnValue: [] },
+  bubbles: true, composed: true,
+}));
+```
+
+This is what `addToQueue()` in [injected.js](injected.js) does. It works from
+empty and non-empty, on every surface, because it invokes YouTube's genuine
+handler.
+
+### How this was found (reusable technique)
+
+When a replayed command no-ops but YouTube's own UI works, **capture what
+YouTube actually fires**. Monkey-patch or listen at the boundary:
+
+```js
+document.addEventListener("yt-action", (e) => {
+  if (e.detail?.actionName === "yt-add-to-playlist-command") {
+    console.log("ARGS:", e.detail.args);   // arg count + shapes = ground truth
+  }
+}, true);
+```
+
+Then perform the real action (⋮ menu → Add to queue) and read the exact
+`actionName` and **all** args. Our mistake was replaying with 1 arg when the real
+call uses 3. Capturing beat guessing.
+
+---
+
 ## Why we skip the menu entirely
 
 The ⋮ menu item (and its DOM) may not exist until you open the menu. But the

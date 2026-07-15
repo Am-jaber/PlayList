@@ -1,15 +1,30 @@
 /*
  * injected.js  -- runs in the PAGE's main world (not the isolated content-script
- * world), so it can read each renderer's Polymer `.data` and call YouTube's own
- * `ytd-app.resolveCommand(...)`.
+ * world), so it can read each renderer's Polymer `.data` and dispatch YouTube's
+ * own actions.
  *
  * Protocol (via window.postMessage):
  *   content.js  --> { source: "mcq", type: "add-to-queue", token }
- *   injected.js --> { source: "mcq-page", type: "result", token, ok }
+ *   injected.js --> { source: "mcq-page", type: "result", token, ok, action }
  *
- * The clicked renderer is located by a temporary attribute the content script
- * stamps on it (data-mcq-target) right before sending the message. Reading
- * `.data` and dispatching must happen here because those live in the main world.
+ * The clicked element is located by a temporary attribute the content script
+ * stamps on it (data-mcq-target).
+ *
+ * -------------------------------------------------------------------------
+ * KEY MECHANISM: the `yt-add-to-playlist-command` action (see ARCHITECTURE.md)
+ * -------------------------------------------------------------------------
+ * YouTube's real "Add to queue" does NOT go through ytd-app.resolveCommand.
+ * resolveCommand(addToPlaylistCommand) only works when a queue already exists;
+ * it silently no-ops from an EMPTY queue. What YouTube's own menu/hover button
+ * fires is a DOM `yt-action` event named "yt-add-to-playlist-command", called
+ * with THREE args:
+ *     arg0 = { clickTrackingParams, addToPlaylistCommand }
+ *     arg1 = the source Element
+ *     arg2 = { sourceData: { signalServiceEndpoint: { actions: [arg0] } } }
+ * Replaying that exact 3-arg event works from any queue state (empty or not),
+ * for any surface, because it invokes YouTube's genuine handler. We build these
+ * args from just a videoId. This replaced a long line of dead ends
+ * (resolveCommand-from-empty, synthesized commands, play-to-seed, SHOW_MINIPLAYER).
  */
 
 (() => {
@@ -36,158 +51,6 @@
     return el && (el.data || el.__data?.data || el.polymerController?.data || el.inst?.data);
   }
 
-  /*
-   * KEY IDEA: command data, not event handlers. See ARCHITECTURE.md.
-   *
-   * YouTube does NOT attach a per-button handler like onAddToQueue(). Every
-   * clickable element carries a "command" object (an innertube command) in its
-   * `.data`, and one generic dispatcher (ytd-app.resolveCommand) executes any
-   * such command. So instead of tracing Polymer event plumbing for "the
-   * handler" (a dead end), we read the element's data and pull the command out.
-   *
-   * The queue action is an `addToPlaylistCommand` whose
-   * `listType === "PLAYLIST_EDIT_LIST_TYPE_QUEUE"`. That object IS the action;
-   * clicking the menu item just passes it to the dispatcher. We wrap it back
-   * into a signalServiceEndpoint command (the shape the menu item dispatches)
-   * and hand it to resolveCommand below.
-   */
-
-  /** Deep-search a data model for the Add-to-queue innertube command. */
-  function findQueueCommand(root) {
-    const stack = [root], seen = new Set();
-    while (stack.length) {
-      const node = stack.pop();
-      if (!node || typeof node !== "object" || seen.has(node)) continue;
-      seen.add(node);
-
-      const apc = node.addToPlaylistCommand;
-      if (apc && apc.listType === "PLAYLIST_EDIT_LIST_TYPE_QUEUE") {
-        // `node` is the action item { clickTrackingParams, addToPlaylistCommand }.
-        return {
-          clickTrackingParams: node.clickTrackingParams,
-          commandMetadata: { webCommandMetadata: { sendPost: true } },
-          signalServiceEndpoint: { signal: "CLIENT_SIGNAL", actions: [node] },
-        };
-      }
-      for (const k in node) {
-        const v = node[k];
-        if (v && typeof v === "object") stack.push(v);
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Deep-search for a plain watch command (watchEndpoint). Used for the sidebar
-   * mix/queue panel, whose items are ALREADY in the active queue and therefore
-   * carry no addToPlaylistCommand -- middle-clicking them should jump to / play
-   * that video within the current queue instead of adding it.
-   *
-   * We prefer a watchEndpoint that references the current playlist (has a
-   * `playlistId` / `index`) so the video plays *in place* in the queue rather
-   * than starting a fresh single-video watch.
-   */
-  function findWatchCommand(root) {
-    const stack = [root], seen = new Set();
-    let fallback = null;
-    while (stack.length) {
-      const node = stack.pop();
-      if (!node || typeof node !== "object" || seen.has(node)) continue;
-      seen.add(node);
-
-      const we = node.watchEndpoint;
-      if (we && we.videoId) {
-        const cmd = {
-          clickTrackingParams: node.clickTrackingParams,
-          commandMetadata: {
-            webCommandMetadata: {
-              webPageType: "WEB_PAGE_TYPE_WATCH",
-            },
-          },
-          watchEndpoint: we,
-        };
-        // Prefer one that stays within the current playlist/queue.
-        if (we.playlistId || we.index != null) return cmd;
-        if (!fallback) fallback = cmd;
-      }
-      for (const k in node) {
-        const v = node[k];
-        if (v && typeof v === "object") stack.push(v);
-      }
-    }
-    return fallback;
-  }
-
-  /**
-   * Extract a videoId from an element by looking at its watch links.
-   * Used for surfaces (e.g. sidebar recommendations) whose `.data` carries no
-   * command at all -- we build the queue command ourselves from the id.
-   */
-  function findVideoId(el) {
-    const SEL = "a[href*='/watch?'], a[href*='/shorts/']";
-    const a = el.matches?.(SEL)
-      ? el
-      : el.querySelector?.(SEL) || el.closest?.(SEL);
-    if (!a) return null;
-    try {
-      const url = new URL(a.href, location.origin);
-      // /watch?v=ID -- id in the query; /shorts/ID -- id in the path.
-      return url.searchParams.get("v") ||
-             (url.pathname.match(/^\/shorts\/([\w-]+)/) || [])[1] ||
-             null;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Build an Add-to-queue command from scratch given only a videoId. This is the
-   * fallback for elements that render as pure view-models with no command in
-   * their data (notably watch-page sidebar recommendations). The shape mirrors
-   * the real command YouTube attaches elsewhere; only the videoId varies.
-   */
-  function synthesizeQueueCommand(videoId) {
-    return {
-      commandMetadata: { webCommandMetadata: { sendPost: true } },
-      signalServiceEndpoint: {
-        signal: "CLIENT_SIGNAL",
-        actions: [{
-          addToPlaylistCommand: {
-            openMiniplayer: true,
-            videoId,
-            listType: "PLAYLIST_EDIT_LIST_TYPE_QUEUE",
-            onCreateListCommand: {
-              commandMetadata: {
-                webCommandMetadata: { sendPost: true, apiUrl: "/youtubei/v1/playlist/create" },
-              },
-              createPlaylistServiceEndpoint: { videoIds: [videoId], params: "CAQ%3D" },
-            },
-            videoIds: [videoId],
-          },
-        }],
-      },
-    };
-  }
-
-  /**
-   * Climb ancestor renderers from `el` looking for a real queue command.
-   * closest() alone is not enough: the innermost renderer (e.g.
-   * yt-lockup-view-model) often has empty data while the command lives on an
-   * outer one (e.g. ytd-rich-item-renderer).
-   */
-  function findQueueCommandNear(el) {
-    let r = el && el.closest ? el.closest(VIDEO_RENDERERS) : null;
-    let hops = 0;
-    while (r && hops < 6) {
-      const data = getData(r);
-      const cmd = data && findQueueCommand(data);
-      if (cmd) return { cmd, el: r };
-      r = r.parentElement ? r.parentElement.closest(VIDEO_RENDERERS) : null;
-      hops++;
-    }
-    return null;
-  }
-
   let appEl = null;
   function getApp() {
     if (appEl && appEl.isConnected) return appEl;
@@ -195,84 +58,166 @@
     return appEl;
   }
 
-  function dispatch(command, sourceEl) {
-    const app = getApp();
-    if (app && typeof app.resolveCommand === "function") {
-      app.resolveCommand(command, { sourceElement: sourceEl || app });
-      log("dispatched via resolveCommand");
-      return true;
-    }
-    // Fallback: fire the event the app binds to.
-    (sourceEl || app || document.body).dispatchEvent(
-      new CustomEvent("yt-action", {
-        detail: {
-          actionName: "yt-service-request",
-          args: [sourceEl || app, command],
-          returnValue: [],
-          optionalAction: false,
-        },
-        bubbles: true, composed: true,
-      })
-    );
-    log("dispatched via yt-action event");
-    return true;
+  // ---- videoId resolution ---------------------------------------------------
+
+  /** Extract a videoId from an element via its watch/shorts link. */
+  function findVideoId(el) {
+    const SEL = "a[href*='/watch?'], a[href*='/shorts/']";
+    const a = el.matches?.(SEL) ? el : (el.querySelector?.(SEL) || el.closest?.(SEL));
+    if (!a) return null;
+    try {
+      const url = new URL(a.href, location.origin);
+      return url.searchParams.get("v") ||
+             (url.pathname.match(/^\/shorts\/([\w-]+)/) || [])[1] || null;
+    } catch { return null; }
   }
 
   /**
-   * Given the stamped target element, climb renderers looking for an action to
-   * perform. Preference order:
-   *   1. Add to queue  (normal videos: home, search, recommendations)
-   *   2. Jump to video (sidebar mix/queue panel: already-queued items)
-   *
-   * Returns { action } describing what happened, or { action: "none" }.
+   * Deep-search a data model for an existing addToPlaylistCommand (queue) and
+   * return its videoId. Preferred over the link when available because it's the
+   * exact video YouTube associates with this item.
    */
-  function performAction(targetEl) {
+  function queueVideoIdFromData(root) {
+    const stack = [root], seen = new Set();
+    while (stack.length) {
+      const n = stack.pop();
+      if (!n || typeof n !== "object" || seen.has(n)) continue;
+      seen.add(n);
+      const apc = n.addToPlaylistCommand;
+      if (apc && apc.listType === "PLAYLIST_EDIT_LIST_TYPE_QUEUE" && apc.videoId) {
+        return apc.videoId;
+      }
+      for (const k in n) if (n[k] && typeof n[k] === "object") stack.push(n[k]);
+    }
+    return null;
+  }
+
+  /** Resolve the videoId for the clicked target, climbing renderers. */
+  function resolveVideoId(targetEl) {
     let el = targetEl && targetEl.closest ? targetEl.closest(VIDEO_RENDERERS) : null;
     let hops = 0;
     while (el && hops < 6) {
       const data = getData(el);
-      if (data) {
-        // 1) Prefer add-to-queue when the item's data offers it (home/search).
-        const queueCmd = findQueueCommand(data);
-        if (queueCmd) {
-          dispatch(queueCmd, el);
-          return { action: "queued" };
-        }
-        // 2) Otherwise (e.g. playlist/mix panel), jump to the video in-queue.
-        const watchCmd = findWatchCommand(data);
-        if (watchCmd) {
-          dispatch(watchCmd, el);
-          return { action: "playing" };
-        }
-      }
+      const vid = data && queueVideoIdFromData(data);
+      if (vid) return vid;
       el = el.parentElement ? el.parentElement.closest(VIDEO_RENDERERS) : null;
       hops++;
     }
+    return findVideoId(targetEl);
+  }
 
-    // 3) Fallback: element carried no usable command (hover-preview overlay,
-    //    bare links, surfaces whose view-model data is empty). Resolve the
-    //    videoId from the nearest link, then:
-    //    3a) prefer the REAL command from another renderer of the same video
-    //        elsewhere in the DOM (the hover preview always overlays a card
-    //        that exists on the page) -- the genuine command carries the full
-    //        context that makes YouTube's queue UI update immediately;
-    //    3b) only synthesize from scratch when no such renderer exists.
-    const videoId = findVideoId(targetEl);
-    if (videoId) {
-      for (const a of document.querySelectorAll(`a[href*="${videoId}"]`)) {
-        const hit = findQueueCommandNear(a);   // climbs ancestor renderers
-        if (hit) {
-          dispatch(hit.cmd, hit.el);
-          log("queued via matched renderer command:", videoId);
-          return { action: "queued" };
-        }
+  // ---- The queue action -----------------------------------------------------
+
+  /** Build the addToPlaylistCommand payload for a videoId. */
+  function buildAddToPlaylistCommand(videoId) {
+    return {
+      openMiniplayer: true,
+      videoId,
+      listType: "PLAYLIST_EDIT_LIST_TYPE_QUEUE",
+      onCreateListCommand: {
+        commandMetadata: { webCommandMetadata: { sendPost: true, apiUrl: "/youtubei/v1/playlist/create" } },
+        createPlaylistServiceEndpoint: { videoIds: [videoId], params: "CAQ%3D" },
+      },
+      videoIds: [videoId],
+      videoCommand: {
+        commandMetadata: { webCommandMetadata: { url: "/watch?v=" + videoId, webPageType: "WEB_PAGE_TYPE_WATCH", rootVe: 3832 } },
+        watchEndpoint: { videoId },
+      },
+    };
+  }
+
+  /**
+   * Add a video to the queue by replaying YouTube's real 3-arg
+   * `yt-add-to-playlist-command` action. Works from any queue state.
+   */
+  function addToQueue(videoId, sourceEl) {
+    const addToPlaylistCommand = buildAddToPlaylistCommand(videoId);
+    const arg0 = { addToPlaylistCommand };
+    const arg1 = sourceEl || getApp();
+    const arg2 = {
+      sourceData: {
+        commandMetadata: { webCommandMetadata: { sendPost: true } },
+        signalServiceEndpoint: { signal: "CLIENT_SIGNAL", actions: [arg0] },
+      },
+    };
+    (sourceEl || getApp() || document.body).dispatchEvent(
+      new CustomEvent("yt-action", {
+        detail: { actionName: "yt-add-to-playlist-command", args: [arg0, arg1, arg2], returnValue: [] },
+        bubbles: true, composed: true,
+      })
+    );
+    log("fired yt-add-to-playlist-command for", videoId);
+    return true;
+  }
+
+  // ---- Jump-to-video (mix/queue panel items, already queued) ---------------
+
+  /** Deep-search for a watchEndpoint; prefer one tied to the current playlist. */
+  function findWatchCommand(root) {
+    const stack = [root], seen = new Set();
+    let fallback = null;
+    while (stack.length) {
+      const n = stack.pop();
+      if (!n || typeof n !== "object" || seen.has(n)) continue;
+      seen.add(n);
+      const we = n.watchEndpoint;
+      if (we && we.videoId) {
+        const cmd = {
+          clickTrackingParams: n.clickTrackingParams,
+          commandMetadata: { webCommandMetadata: { webPageType: "WEB_PAGE_TYPE_WATCH" } },
+          watchEndpoint: we,
+        };
+        if (we.playlistId || we.index != null) return cmd;
+        if (!fallback) fallback = cmd;
       }
-      dispatch(synthesizeQueueCommand(videoId), getApp());
-      log("queued via synthesized command:", videoId);
+      for (const k in n) if (n[k] && typeof n[k] === "object") stack.push(n[k]);
+    }
+    return fallback;
+  }
+
+  function dispatchWatch(command, sourceEl) {
+    const app = getApp();
+    if (app && typeof app.resolveCommand === "function") {
+      app.resolveCommand(command, { sourceElement: sourceEl || app });
+      return true;
+    }
+    return false;
+  }
+
+  /** Is the clicked item inside an active mix/queue panel (already queued)? */
+  function isQueuePanelItem(targetEl) {
+    return !!(targetEl && targetEl.closest &&
+      targetEl.closest("ytd-playlist-panel-video-renderer"));
+  }
+
+  // ---- Decide + perform -----------------------------------------------------
+
+  /**
+   * 1. Item is in the active mix/queue panel -> jump to & play it in place.
+   * 2. Otherwise -> add to queue (works from empty via the real action).
+   */
+  function performAction(targetEl) {
+    // 1) Mix/queue panel item: play it in place rather than re-adding.
+    if (isQueuePanelItem(targetEl)) {
+      const renderer = targetEl.closest("ytd-playlist-panel-video-renderer");
+      const data = getData(renderer);
+      const watchCmd = data && findWatchCommand(data);
+      if (watchCmd) {
+        dispatchWatch(watchCmd, renderer);
+        log("mix-panel item -> playing:", watchCmd.watchEndpoint?.videoId);
+        return { action: "playing" };
+      }
+    }
+
+    // 2) Everything else: add to queue.
+    const videoId = resolveVideoId(targetEl);
+    if (videoId) {
+      const sourceEl = (targetEl.closest && targetEl.closest(VIDEO_RENDERERS)) || getApp();
+      addToQueue(videoId, sourceEl);
       return { action: "queued" };
     }
 
-    log("no actionable command found");
+    log("no videoId resolved for target");
     return { action: "none" };
   }
 
